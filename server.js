@@ -53,7 +53,7 @@ function getCard(id) {
 function broadcastRooms() {
   const list = Array.from(rooms.values())
     .filter(r => r.status === 'waiting')
-    .map(r => ({ id: r.id, hostName: r.hostName, bet: r.bet }));
+    .map(r => ({ id: r.id, hostId: r.hostId, hostName: r.hostName, bet: r.bet }));
   io.emit('lobby_update', list);
 }
 
@@ -62,7 +62,7 @@ function startTurn(match) {
 
   if (currentP.maxMana < 8) currentP.maxMana++;
   currentP.currentMana = currentP.maxMana;
-  currentP.board.forEach(m => { m.canAttack = true; });
+  currentP.board.forEach(m => { m.canAttack = (m.atk > 0); });
 
   if (currentP.deck.length > 0) {
     if (currentP.hand.length < 6) currentP.hand.push(currentP.deck.pop());
@@ -70,7 +70,7 @@ function startTurn(match) {
   } else {
     currentP.fatigue++;
     currentP.hp -= currentP.fatigue;
-    emitLog(match, { text: `${currentP.name} страдает от усталости (-${currentP.fatigue} HP)`, icon: '💀' });
+    emitLog(match, { text: `${currentP.name} терпит усталость (-${currentP.fatigue} HP)`, icon: '💀' });
   }
 
   if (match.timer) clearTimeout(match.timer);
@@ -83,7 +83,7 @@ function switchTurn(match) {
   if (checkGameOver(match)) return;
   match.turn = match.turn === 1 ? 2 : 1;
   const nextP = match.turn === 1 ? match.p1 : match.p2;
-  emitLog(match, { text: `Ход игрока: ${nextP.name}`, icon: '⏳' });
+  emitLog(match, { text: `Ход: ${nextP.name}`, icon: '⏳' });
   startTurn(match);
 }
 
@@ -136,7 +136,7 @@ io.on('connection', (socket) => {
   socket.on('get_lobby', () => {
     const list = Array.from(rooms.values())
       .filter(r => r.status === 'waiting')
-      .map(r => ({ id: r.id, hostName: r.hostName, bet: r.bet }));
+      .map(r => ({ id: r.id, hostId: r.hostId, hostName: r.hostName, bet: r.bet }));
     socket.emit('lobby_update', list);
   });
 
@@ -167,6 +167,12 @@ io.on('connection', (socket) => {
     const room = rooms.get(roomId);
     if (!room || room.status !== 'waiting') return;
 
+    // Защита от входа в свою комнату
+    if (room.hostId === socket.id) {
+      socket.emit('room_error', 'Нельзя присоединиться к своей собственной комнате');
+      return;
+    }
+
     room.status = 'playing';
     room.guestId = socket.id;
     room.guestName = guestName || 'Игрок 2';
@@ -189,7 +195,7 @@ io.on('connection', (socket) => {
     };
 
     matches.set(roomId, match);
-    emitLog(match, { text: `Матч начался! Ставка: ${match.bet} 🪙`, icon: '⚔️' });
+    emitLog(match, { text: `Дуэль началась! Банк: ${match.bet * 2} 🪙`, icon: '⚔️' });
     startTurn(match);
   });
 
@@ -222,7 +228,7 @@ io.on('connection', (socket) => {
         maxHp: card.hp,
         icon: card.icon,
         taunt: !!card.taunt,
-        canAttack: !!card.rush
+        canAttack: !!card.rush && card.atk > 0
       };
 
       if (card.healHero) player.hp = Math.min(25, player.hp + card.healHero);
@@ -282,7 +288,7 @@ io.on('connection', (socket) => {
       if (hasTaunt) return;
       opp.hp -= attacker.atk;
       attacker.canAttack = false;
-      emitLog(match, { text: `${attacker.name} атаковал героя (-${attacker.atk} HP)`, icon: '💥' });
+      emitLog(match, { text: `${attacker.name} атакует героя (-${attacker.atk} HP)`, icon: '💥' });
     } else {
       const defender = opp.board.find(m => m.uid === targetId);
       if (!defender || (hasTaunt && !defender.taunt)) return;
@@ -292,6 +298,10 @@ io.on('connection', (socket) => {
       attacker.canAttack = false;
       emitLog(match, { text: `${attacker.name} ⚔️ ${defender.name} (-${attacker.atk}/-${defender.atk})`, icon: '⚔️' });
     }
+
+    // Оповещаем клиентов об анимации удара
+    io.to(match.p1.id).emit('card_attack_anim', { attackerUid, targetId });
+    io.to(match.p2.id).emit('card_attack_anim', { attackerUid, targetId });
 
     player.board = player.board.filter(m => m.hp > 0);
     opp.board = opp.board.filter(m => m.hp > 0);
@@ -317,4 +327,4 @@ io.on('connection', (socket) => {
   });
 });
 
-server.listen(PORT, () => console.log(`CCG server on ${PORT}`));
+server.listen(PORT, () => console.log(`CCG Server on ${PORT}`));
