@@ -4,111 +4,95 @@ const { Server } = require('socket.io');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, {
-  cors: { origin: "*" }
-});
+const io = new Server(server, { cors: { origin: "*" } });
 
 const PORT = process.env.PORT || 3000;
 
-// Хранилище комнат и активных матчей
 const rooms = new Map();
 const matches = new Map();
 
-function generateDeck() {
-  const elements = ['fire', 'water', 'earth'];
-  const deck = [];
-  let id = 1;
-  elements.forEach(elem => {
-    for (let power = 1; power <= 5; power++) {
-      deck.push({ id: id++, element: elem, power });
-    }
-  });
-  return deck.sort(() => Math.random() - 0.5);
+function getFixedDeck() {
+  return [
+    { id: 'blade', name: 'Клинок', type: 'weapon', val: 3, icon: '⚔️' },
+    { id: 'axe', name: 'Секира', type: 'weapon', val: 5, icon: '🪓' },
+    { id: 'dragon', name: 'Дракон', type: 'weapon', val: 7, icon: '🐉' },
+    { id: 'shield', name: 'Щит', type: 'shield', val: 0, icon: '🛡️' },
+    { id: 'spy', name: 'Шпион', type: 'trap', val: 1, icon: '🦹' },
+    { id: 'mine', name: 'Мина', type: 'trap', val: 0, icon: '💣' }
+  ];
 }
 
-function resolveBattle(c1, c2) {
-  let p1Bonus = 0;
-  let p2Bonus = 0;
+function resolveLane(p1Cards, p2Cards) {
+  let p1Bonus = 0, p2Bonus = 0;
+  let p1Weps = p1Cards.filter(c => c.type === 'weapon');
+  let p2Weps = p2Cards.filter(c => c.type === 'weapon');
+  let p1Shield = p1Cards.some(c => c.type === 'shield');
+  let p2Shield = p2Cards.some(c => c.type === 'shield');
+  let p1Spy = p1Cards.some(c => c.type === 'spy');
+  let p2Spy = p2Cards.some(c => c.type === 'spy');
+  let p1Mine = p1Cards.some(c => c.type === 'mine');
+  let p2Mine = p2Cards.some(c => c.type === 'mine');
 
-  if (c1.element === 'fire' && c2.element === 'earth') p1Bonus = 2;
-  else if (c1.element === 'earth' && c2.element === 'water') p1Bonus = 2;
-  else if (c1.element === 'water' && c2.element === 'fire') p1Bonus = 2;
+  let p1Total = p1Cards.reduce((acc, c) => acc + c.val, 0);
+  let p2Total = p2Cards.reduce((acc, c) => acc + c.val, 0);
 
-  if (c2.element === 'fire' && c1.element === 'earth') p2Bonus = 2;
-  else if (c2.element === 'earth' && c1.element === 'water') p2Bonus = 2;
-  else if (c2.element === 'water' && c1.element === 'fire') p2Bonus = 2;
+  // 1. Срабатывание Мин
+  if (p1Mine && p2Total >= 6) p2Total = 0;
+  if (p2Mine && p1Total >= 6) p1Total = 0;
 
-  const total1 = c1.power + p1Bonus;
-  const total2 = c2.power + p2Bonus;
-
-  let winner = 0;
-  let dmg = 0;
-  if (total1 > total2) {
-    winner = 1;
-    dmg = total1 - total2;
-  } else if (total2 > total1) {
-    winner = 2;
-    dmg = total2 - total1;
+  // 2. Срабатывание Щитов
+  if (p1Shield && p2Weps.length > 0) {
+    let maxEnemy = Math.max(...p2Weps.map(w => w.val));
+    p2Total = Math.max(0, p2Total - maxEnemy);
+    p1Bonus += maxEnemy;
+  }
+  if (p2Shield && p1Weps.length > 0) {
+    let maxEnemy = Math.max(...p1Weps.map(w => w.val));
+    p1Total = Math.max(0, p1Total - maxEnemy);
+    p2Bonus += maxEnemy;
   }
 
-  return { winner, dmg, p1Bonus, p2Bonus, total1, total2 };
+  // 3. Срабатывание Шпиона
+  if (p1Spy && p2Shield) { p2Total = Math.max(0, p2Total - 4); p1Bonus += 4; }
+  if (p2Spy && p1Shield) { p1Total = Math.max(0, p1Total - 4); p2Bonus += 4; }
+
+  return { p1Score: p1Total + p1Bonus, p2Score: p2Total + p2Bonus };
 }
 
 function broadcastRooms() {
-  const publicRooms = Array.from(rooms.values())
+  const list = Array.from(rooms.values())
     .filter(r => r.status === 'waiting')
-    .map(r => ({
-      id: r.id,
-      hostName: r.hostName,
-      bet: r.bet
-    }));
-  io.emit('lobby_update', publicRooms);
+    .map(r => ({ id: r.id, hostName: r.hostName, bet: r.bet }));
+  io.emit('lobby_update', list);
 }
 
 io.on('connection', (socket) => {
-  // Отправка текущих комнат при входе
   socket.on('get_lobby', () => {
-    const publicRooms = Array.from(rooms.values())
+    const list = Array.from(rooms.values())
       .filter(r => r.status === 'waiting')
-      .map(r => ({
-        id: r.id,
-        hostName: r.hostName,
-        bet: r.bet
-      }));
-    socket.emit('lobby_update', publicRooms);
+      .map(r => ({ id: r.id, hostName: r.hostName, bet: r.bet }));
+    socket.emit('lobby_update', list);
   });
 
-  // Создание комнаты
   socket.on('create_room', ({ bet, hostName }) => {
     const roomId = 'room_' + Math.random().toString(36).substring(2, 9);
-    rooms.set(roomId, {
-      id: roomId,
-      hostId: socket.id,
-      hostName: hostName || 'Игрок 1',
-      bet: Number(bet) || 10,
-      status: 'waiting'
-    });
+    rooms.set(roomId, { id: roomId, hostId: socket.id, hostName: hostName || 'Игрок 1', bet: Number(bet) || 10, status: 'waiting' });
     socket.join(roomId);
     socket.emit('room_created', { roomId });
     broadcastRooms();
   });
 
-  // Отмена комнаты создателем
   socket.on('leave_room', ({ roomId }) => {
-    const room = rooms.get(roomId);
-    if (room && room.hostId === socket.id) {
+    const r = rooms.get(roomId);
+    if (r && r.hostId === socket.id) {
       rooms.delete(roomId);
       broadcastRooms();
     }
   });
 
-  // Подключение к существующей комнате
   socket.on('join_room', ({ roomId, guestName }) => {
     const room = rooms.get(roomId);
-    if (!room || room.status !== 'waiting') {
-      socket.emit('error_msg', 'Комната уже недоступна или заполнена');
-      return;
-    }
+    if (!room || room.status !== 'waiting') return;
 
     room.status = 'playing';
     room.guestId = socket.id;
@@ -116,39 +100,20 @@ io.on('connection', (socket) => {
     socket.join(roomId);
     broadcastRooms();
 
-    // Инициализация матча
-    const deck1 = generateDeck();
-    const deck2 = generateDeck();
     const match = {
       roomId,
       bet: room.bet,
-      p1: { id: room.hostId, name: room.hostName, hp: 20, deck: deck1, hand: deck1.splice(0, 3), playedCard: null },
-      p2: { id: room.guestId, name: room.guestName, hp: 20, deck: deck2, hand: deck2.splice(0, 3), playedCard: null },
-      round: 1
+      round: 1, // Раунды: 1 (1 карта), 2 (1 карта), 3 (2 карты), 4 (2 карты)
+      p1: { id: room.hostId, name: room.hostName, hand: getFixedDeck(), moves: [], lanes: [[], [], []] },
+      p2: { id: room.guestId, name: room.guestName, hand: getFixedDeck(), moves: [], lanes: [[], [], []] }
     };
     matches.set(roomId, match);
 
-    // Старт матча для P1
-    io.to(match.p1.id).emit('match_start', {
-      bet: match.bet,
-      oppName: match.p2.name,
-      hand: match.p1.hand,
-      myHp: match.p1.hp,
-      oppHp: match.p2.hp
-    });
-
-    // Старт матча для P2
-    io.to(match.p2.id).emit('match_start', {
-      bet: match.bet,
-      oppName: match.p1.name,
-      hand: match.p2.hand,
-      myHp: match.p2.hp,
-      oppHp: match.p1.hp
-    });
+    io.to(match.p1.id).emit('match_start', { bet: match.bet, oppName: match.p2.name, hand: match.p1.hand, round: 1, reqCards: 1 });
+    io.to(match.p2.id).emit('match_start', { bet: match.bet, oppName: match.p1.name, hand: match.p2.hand, round: 1, reqCards: 1 });
   });
 
-  // Розыгрыш карты
-  socket.on('play_card', ({ roomId, cardId }) => {
+  socket.on('submit_moves', ({ roomId, moves }) => {
     const match = matches.get(roomId);
     if (!match) return;
 
@@ -156,71 +121,64 @@ io.on('connection', (socket) => {
     const player = isP1 ? match.p1 : match.p2;
     const opp = isP1 ? match.p2 : match.p1;
 
-    if (player.playedCard) return;
+    player.moves = moves; // moves: [{ cardId, laneIndex }]
+    io.to(opp.id).emit('opp_ready');
 
-    const cIdx = player.hand.findIndex(c => c.id === cardId);
-    if (cIdx === -1) return;
-    player.playedCard = player.hand.splice(cIdx, 1)[0];
-
-    // Уведомляем оппонента, что сделан ход рубашкой
-    io.to(opp.id).emit('opp_card_played');
-
-    // Если оба походили — рассчитываем раунд
-    if (match.p1.playedCard && match.p2.playedCard) {
-      const c1 = match.p1.playedCard;
-      const c2 = match.p2.playedCard;
-      const res = resolveBattle(c1, c2);
-
-      if (res.winner === 1) match.p2.hp = Math.max(0, match.p2.hp - res.dmg);
-      if (res.winner === 2) match.p1.hp = Math.max(0, match.p1.hp - res.dmg);
-
-      // Добор карт
-      if (match.p1.deck.length > 0 && match.p1.hand.length < 4) match.p1.hand.push(match.p1.deck.pop());
-      if (match.p2.deck.length > 0 && match.p2.hand.length < 4) match.p2.hand.push(match.p2.deck.pop());
-
-      const gameOver = match.p1.hp <= 0 || match.p2.hp <= 0 || (match.p1.deck.length === 0 && match.p1.hand.length === 0);
-
-      // Результат для P1
-      io.to(match.p1.id).emit('round_result', {
-        myCard: c1,
-        oppCard: c2,
-        myBonus: res.p1Bonus,
-        oppBonus: res.p2Bonus,
-        winner: res.winner === 1 ? 'win' : res.winner === 2 ? 'lose' : 'draw',
-        dmg: res.dmg,
-        myHp: match.p1.hp,
-        oppHp: match.p2.hp,
-        newHand: match.p1.hand,
-        gameOver
+    if (match.p1.moves.length > 0 && match.p2.moves.length > 0) {
+      // Применяем карты игроков к линиям
+      match.p1.moves.forEach(m => {
+        const cIdx = match.p1.hand.findIndex(c => c.id === m.cardId);
+        if (cIdx !== -1) {
+          const card = match.p1.hand.splice(cIdx, 1)[0];
+          match.p1.lanes[m.laneIndex].push(card);
+        }
       });
 
-      // Результат для P2
-      io.to(match.p2.id).emit('round_result', {
-        myCard: c2,
-        oppCard: c1,
-        myBonus: res.p2Bonus,
-        oppBonus: res.p1Bonus,
-        winner: res.winner === 2 ? 'win' : res.winner === 1 ? 'lose' : 'draw',
-        dmg: res.dmg,
-        myHp: match.p2.hp,
-        oppHp: match.p1.hp,
-        newHand: match.p2.hand,
-        gameOver
+      match.p2.moves.forEach(m => {
+        const cIdx = match.p2.hand.findIndex(c => c.id === m.cardId);
+        if (cIdx !== -1) {
+          const card = match.p2.hand.splice(cIdx, 1)[0];
+          match.p2.lanes[m.laneIndex].push(card);
+        }
       });
 
-      // Сброс ходов
-      match.p1.playedCard = null;
-      match.p2.playedCard = null;
+      // Пересчитываем все 3 линии
+      const laneScores = [0, 1, 2].map(idx => resolveLane(match.p1.lanes[idx], match.p2.lanes[idx]));
+
+      match.p1.moves = [];
+      match.p2.moves = [];
       match.round++;
 
-      if (gameOver) {
+      const isGameOver = match.round > 4;
+
+      // Отправляем итоги
+      io.to(match.p1.id).emit('round_revealed', {
+        myLanes: match.p1.lanes,
+        oppLanes: match.p2.lanes,
+        scores: laneScores.map(s => ({ my: s.p1Score, opp: s.p2Score })),
+        hand: match.p1.hand,
+        round: match.round,
+        reqCards: match.round === 2 ? 1 : 2,
+        isGameOver
+      });
+
+      io.to(match.p2.id).emit('round_revealed', {
+        myLanes: match.p2.lanes,
+        oppLanes: match.p1.lanes,
+        scores: laneScores.map(s => ({ my: s.p2Score, opp: s.p1Score })),
+        hand: match.p2.hand,
+        round: match.round,
+        reqCards: match.round === 2 ? 1 : 2,
+        isGameOver
+      });
+
+      if (isGameOver) {
         matches.delete(roomId);
         rooms.delete(roomId);
       }
     }
   });
 
-  // Отключение игрока
   socket.on('disconnect', () => {
     for (const [id, room] of rooms.entries()) {
       if (room.hostId === socket.id) {
@@ -231,6 +189,4 @@ io.on('connection', (socket) => {
   });
 });
 
-server.listen(PORT, () => {
-  console.log(`Elemental Clash server running on port ${PORT}`);
-});
+server.listen(PORT, () => console.log(`Server online port ${PORT}`));
