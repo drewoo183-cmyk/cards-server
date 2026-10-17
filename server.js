@@ -109,8 +109,23 @@ io.on('connection', (socket) => {
     };
     matches.set(roomId, match);
 
-    io.to(match.p1.id).emit('match_start', { bet: match.bet, oppName: match.p2.name, hand: match.p1.hand, round: 1, reqCards: 1 });
-    io.to(match.p2.id).emit('match_start', { bet: match.bet, oppName: match.p1.name, hand: match.p2.hand, round: 1, reqCards: 1 });
+    io.to(match.p1.id).emit('match_start', {
+      roomId,
+      bet: match.bet,
+      oppName: match.p2.name,
+      hand: match.p1.hand,
+      round: 1,
+      reqCards: 1
+    });
+
+    io.to(match.p2.id).emit('match_start', {
+      roomId,
+      bet: match.bet,
+      oppName: match.p1.name,
+      hand: match.p2.hand,
+      round: 1,
+      reqCards: 1
+    });
   });
 
   socket.on('submit_moves', ({ roomId, moves }) => {
