@@ -8,13 +8,10 @@ const io = new Server(server, { cors: { origin: "*" } });
 
 const PORT = process.env.PORT || 3000;
 
-// Встроенная база карт (аналог cardsData.js)
 const CARDS_MAP = new Map();
-// Хранилище комнат и активных матчей
 const rooms = new Map();
 const matches = new Map();
 
-// Инициализируем карты
 const rawCards = [
   { id: 'c1_1', mana: 1, name: 'Пехотинец', type: 'minion', atk: 2, hp: 1, icon: '🗡️' },
   { id: 'c1_2', mana: 1, name: 'Щитоносец', type: 'minion', atk: 0, hp: 4, icon: '🛡️', taunt: true },
@@ -62,32 +59,22 @@ function broadcastRooms() {
 
 function startTurn(match) {
   const currentP = match.turn === 1 ? match.p1 : match.p2;
-  const oppP = match.turn === 1 ? match.p2 : match.p1;
 
-  // Увеличение маны (до макс. 8)
   if (currentP.maxMana < 8) currentP.maxMana++;
   currentP.currentMana = currentP.maxMana;
-
-  // Существа готовы к бою
   currentP.board.forEach(m => { m.canAttack = true; });
 
-  // Добор карты
   if (currentP.deck.length > 0) {
-    if (currentP.hand.length < 6) {
-      currentP.hand.push(currentP.deck.pop());
-    } else {
-      currentP.deck.pop(); // Сгорание карты при переполнении
-    }
+    if (currentP.hand.length < 6) currentP.hand.push(currentP.deck.pop());
+    else currentP.deck.pop();
   } else {
     currentP.fatigue++;
     currentP.hp -= currentP.fatigue;
+    emitLog(match, { text: `${currentP.name} страдает от усталости (-${currentP.fatigue} HP)`, icon: '💀' });
   }
 
-  // Сброс таймера на 45 сек
   if (match.timer) clearTimeout(match.timer);
-  match.timer = setTimeout(() => {
-    switchTurn(match);
-  }, 45000);
+  match.timer = setTimeout(() => switchTurn(match), 45000);
 
   sendMatchState(match);
 }
@@ -95,7 +82,14 @@ function startTurn(match) {
 function switchTurn(match) {
   if (checkGameOver(match)) return;
   match.turn = match.turn === 1 ? 2 : 1;
+  const nextP = match.turn === 1 ? match.p1 : match.p2;
+  emitLog(match, { text: `Ход игрока: ${nextP.name}`, icon: '⏳' });
   startTurn(match);
+}
+
+function emitLog(match, logEntry) {
+  io.to(match.p1.id).emit('combat_log', logEntry);
+  io.to(match.p2.id).emit('combat_log', logEntry);
 }
 
 function checkGameOver(match) {
@@ -120,7 +114,7 @@ function sendMatchState(match) {
     maxMana: p.maxMana,
     deckCount: p.deck.length,
     board: p.board,
-    hand: isSelf ? p.hand : p.hand.length // скрываем карты соперника в руке
+    hand: isSelf ? p.hand : p.hand.length
   });
 
   io.to(match.p1.id).emit('sync_state', {
@@ -179,7 +173,6 @@ io.on('connection', (socket) => {
     socket.join(roomId);
     broadcastRooms();
 
-    // Сборка колод из 15 карт
     const fallbackDeck = ['c1_1', 'c1_2', 'c1_3', 'c1_4', 'c2_1', 'c2_2', 'c2_4', 'c3_1', 'c3_2', 'c3_4', 'c4_1', 'c4_3', 'c5_1', 'c6_1', 'c8_1'];
     const p1DeckIds = (room.hostDeck || fallbackDeck).slice().sort(() => Math.random() - 0.5);
     const p2DeckIds = (deck && deck.length === 15 ? deck : fallbackDeck).slice().sort(() => Math.random() - 0.5);
@@ -191,35 +184,15 @@ io.on('connection', (socket) => {
       roomId,
       bet: room.bet,
       turn: 1,
-      p1: {
-        id: room.hostId,
-        name: room.hostName,
-        hp: 25,
-        maxMana: 0,
-        currentMana: 0,
-        fatigue: 0,
-        deck: p1Deck,
-        hand: p1Deck.splice(0, 3),
-        board: []
-      },
-      p2: {
-        id: room.guestId,
-        name: room.guestName,
-        hp: 25,
-        maxMana: 0,
-        currentMana: 0,
-        fatigue: 0,
-        deck: p2Deck,
-        hand: p2Deck.splice(0, 4), // Второй игрок берет 4 карты на старте
-        board: []
-      }
+      p1: { id: room.hostId, name: room.hostName, hp: 25, maxMana: 0, currentMana: 0, fatigue: 0, deck: p1Deck, hand: p1Deck.splice(0, 3), board: [] },
+      p2: { id: room.guestId, name: room.guestName, hp: 25, maxMana: 0, currentMana: 0, fatigue: 0, deck: p2Deck, hand: p2Deck.splice(0, 4), board: [] }
     };
 
     matches.set(roomId, match);
+    emitLog(match, { text: `Матч начался! Ставка: ${match.bet} 🪙`, icon: '⚔️' });
     startTurn(match);
   });
 
-  // Разыгрывание карты из руки
   socket.on('play_card', ({ roomId, cardUid, targetId }) => {
     const match = matches.get(roomId);
     if (!match) return;
@@ -235,9 +208,8 @@ io.on('connection', (socket) => {
 
     if (player.currentMana < card.mana) return;
 
-    // Розыгрыш существа
     if (card.type === 'minion') {
-      if (player.board.length >= 4) return; // Макс 4 существа на столе
+      if (player.board.length >= 4) return;
       player.currentMana -= card.mana;
       player.hand.splice(cIdx, 1);
 
@@ -250,55 +222,49 @@ io.on('connection', (socket) => {
         maxHp: card.hp,
         icon: card.icon,
         taunt: !!card.taunt,
-        canAttack: !!card.rush // Существо с Rush может атаковать сразу
+        canAttack: !!card.rush
       };
 
       if (card.healHero) player.hp = Math.min(25, player.hp + card.healHero);
       if (card.enemyDmg) opp.hp -= card.enemyDmg;
-      if (card.draw && player.deck.length > 0 && player.hand.length < 6) {
-        player.hand.push(player.deck.pop());
-      }
+      if (card.draw && player.deck.length > 0 && player.hand.length < 6) player.hand.push(player.deck.pop());
 
       player.board.push(minion);
-    } 
-    // Розыгрыш заклинания
-    else if (card.type === 'spell') {
+      emitLog(match, { text: `${player.name} призвал: ${card.name} (${card.atk}/${card.hp})`, icon: card.icon });
+    } else if (card.type === 'spell') {
       player.currentMana -= card.mana;
       player.hand.splice(cIdx, 1);
 
+      let targetName = 'цель';
       if (card.dmg && targetId) {
-        if (targetId === 'opp_hero') opp.hp -= card.dmg;
+        if (targetId === 'opp_hero') { opp.hp -= card.dmg; targetName = `Героя (${opp.name})`; }
         else {
           const tMinion = opp.board.find(m => m.uid === targetId) || player.board.find(m => m.uid === targetId);
-          if (tMinion) tMinion.hp -= card.dmg;
+          if (tMinion) { tMinion.hp -= card.dmg; targetName = tMinion.name; }
         }
       }
       if (card.heal && targetId) {
-        if (targetId === 'my_hero') player.hp = Math.min(25, player.hp + card.heal);
+        if (targetId === 'my_hero') { player.hp = Math.min(25, player.hp + card.heal); targetName = 'своего героя'; }
         else {
           const tMinion = player.board.find(m => m.uid === targetId);
-          if (tMinion) tMinion.hp = Math.min(tMinion.maxHp, tMinion.hp + card.heal);
+          if (tMinion) { tMinion.hp = Math.min(tMinion.maxHp, tMinion.hp + card.heal); targetName = tMinion.name; }
         }
       }
       if (card.aoeDmg) {
         opp.board.forEach(m => { m.hp -= card.aoeDmg; });
-      }
-      if (card.draw) {
-        for (let i = 0; i < card.draw; i++) {
-          if (player.deck.length > 0 && player.hand.length < 6) player.hand.push(player.deck.pop());
-        }
+        targetName = 'всех врагов';
       }
 
-      // Чистим погибших
       player.board = player.board.filter(m => m.hp > 0);
       opp.board = opp.board.filter(m => m.hp > 0);
+
+      emitLog(match, { text: `${player.name}: ${card.name} ➔ ${targetName}`, icon: card.icon });
     }
 
     checkGameOver(match);
     sendMatchState(match);
   });
 
-  // Атака существом стола
   socket.on('attack', ({ roomId, attackerUid, targetId }) => {
     const match = matches.get(roomId);
     if (!match) return;
@@ -311,24 +277,22 @@ io.on('connection', (socket) => {
     const attacker = player.board.find(m => m.uid === attackerUid);
     if (!attacker || !attacker.canAttack || attacker.atk <= 0) return;
 
-    // Проверка Провокации (Taunt)
     const hasTaunt = opp.board.some(m => m.taunt);
     if (targetId === 'opp_hero') {
-      if (hasTaunt) return; // Нельзя бить в лицо, если есть Taunt
+      if (hasTaunt) return;
       opp.hp -= attacker.atk;
       attacker.canAttack = false;
+      emitLog(match, { text: `${attacker.name} атаковал героя (-${attacker.atk} HP)`, icon: '💥' });
     } else {
       const defender = opp.board.find(m => m.uid === targetId);
-      if (!defender) return;
-      if (hasTaunt && !defender.taunt) return; // Если есть Taunt, бить можно только его
+      if (!defender || (hasTaunt && !defender.taunt)) return;
 
-      // Взаимный размен характеристиками
       defender.hp -= attacker.atk;
       attacker.hp -= defender.atk;
       attacker.canAttack = false;
+      emitLog(match, { text: `${attacker.name} ⚔️ ${defender.name} (-${attacker.atk}/-${defender.atk})`, icon: '⚔️' });
     }
 
-    // Удаление павших существ
     player.board = player.board.filter(m => m.hp > 0);
     opp.board = opp.board.filter(m => m.hp > 0);
 
@@ -336,14 +300,11 @@ io.on('connection', (socket) => {
     sendMatchState(match);
   });
 
-  // Завершение хода кнопкой
   socket.on('end_turn', ({ roomId }) => {
     const match = matches.get(roomId);
     if (!match) return;
     const currentP = match.turn === 1 ? match.p1 : match.p2;
-    if (currentP.id === socket.id) {
-      switchTurn(match);
-    }
+    if (currentP.id === socket.id) switchTurn(match);
   });
 
   socket.on('disconnect', () => {
@@ -356,4 +317,4 @@ io.on('connection', (socket) => {
   });
 });
 
-server.listen(PORT, () => console.log(`Arena server listening on ${PORT}`));
+server.listen(PORT, () => console.log(`CCG server on ${PORT}`));
